@@ -1,6 +1,7 @@
 import psycopg
 import streamlit as st
 
+
 @st.cache_resource
 def get_conn():
     host = st.secrets["SUPABASE_DB_HOST"]
