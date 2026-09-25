@@ -1,3 +1,3 @@
 # Global application settings
 
-REFRESH_RATE = 5  # seconds
+REFRESH_RATE = 25  # seconds
