@@ -10,6 +10,7 @@ from pages_app.open_interest import render_open_interest_page
 from pages_app.curves import render_curves_page
 from pages_app.price_mapping import render_price_mapping_page
 from pages_app.market_data import render_market_data_page
+from pages_app.ru_ssf_rates import render_ru_ssf_rates_page
 
 
 # ============================================================
@@ -44,6 +45,7 @@ page = st.sidebar.radio(
         "Spreads",
         "Fair Values",
         "Index Arb",
+        "Russian SSF Rates",
         "Open Interest",
         "Curves",
         "Price Mapping",
@@ -86,6 +88,10 @@ try:
     elif page == "Market Data":
 
         render_market_data_page()
+
+    elif page == "Russian SSF Rates":
+
+        render_ru_ssf_rates_page()
 
 
 except Exception as e:
