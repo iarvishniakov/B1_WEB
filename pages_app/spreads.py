@@ -18,50 +18,198 @@ ALLOWED_SOURCE_TABLES = {
 
 
 # ============================================================
+# BASIC HELPERS
+# ============================================================
+
+def clean_text(value):
+    if value is None:
+        return ""
+
+    return str(value).strip()
+
+
+def to_float(value):
+    value = pd.to_numeric(
+        value,
+        errors="coerce",
+    )
+
+    if pd.isna(value):
+        return None
+
+    return float(value)
+
+
+def to_bool(value):
+    if isinstance(value, bool):
+        return value
+
+    if value is None:
+        return False
+
+    if isinstance(value, (int, float)):
+        return bool(value)
+
+    text = str(value).strip().lower()
+
+    return text in {
+        "true",
+        "1",
+        "yes",
+        "y",
+        "t",
+    }
+
+
+def is_section_row(desc):
+    """
+    Any description starting with *** is treated
+    as a section/header row.
+
+    Example:
+        *** Precious Metals
+
+    displayed as:
+        Precious Metals
+    """
+
+    return clean_text(desc).startswith("***")
+
+
+def get_section_name(desc):
+    desc = clean_text(desc)
+
+    if desc.startswith("***"):
+        return desc[3:].strip()
+
+    return desc
+
+
+# ============================================================
+# SPREAD FORMATTING
+# ============================================================
+
+def normalize_n_dec(value):
+    """
+    Convert n_dec to a non-negative integer.
+
+    Default = 2 if missing/invalid.
+    """
+
+    if value is None:
+        return 2
+
+    try:
+        value = int(
+            float(value)
+        )
+    except (
+        TypeError,
+        ValueError,
+    ):
+        return 2
+
+    return max(
+        value,
+        0,
+    )
+
+
+def format_spread(
+    value,
+    n_dec,
+):
+    """
+    Examples:
+
+        n_dec = 0 -> 57
+        n_dec = 1 -> 24.1
+        n_dec = 2 -> 24.12
+    """
+
+    if (
+        value is None
+        or pd.isna(value)
+    ):
+        return ""
+
+    n_dec = normalize_n_dec(
+        n_dec
+    )
+
+    return f"{value:.{n_dec}f}"
+
+
+def format_price(value):
+    if (
+        value is None
+        or pd.isna(value)
+    ):
+        return ""
+
+    return f"{value:,.3f}"
+
+
+# ============================================================
 # LOAD SPREAD DEFINITIONS
-# Loaded once per Streamlit process
+#
+# Cached for the lifetime of the app.
 # ============================================================
 
 @st.cache_resource
 def load_spreads_input():
-    """
-    Load spread definitions once when the Streamlit app starts.
-
-    If b1_spreads_inputs is changed in Supabase,
-    restart Streamlit to reload the definitions.
-    """
-
     conn = get_conn()
 
-    sql = """
-        SELECT
-            "desc",
-            contract_1,
-            contract_2,
-            fx_hedge,
-            contract_fx,
-            mult_1,
-            mult_2,
-            mult_fx,
-            "offset",
-            src1,
-            src2,
-            srcfx
-        FROM public.b1_spreads_inputs
-    """
-
     with conn.cursor() as cur:
-        cur.execute(sql)
+        cur.execute(
+            """
+            SELECT
+                "desc",
+                contract_1,
+                contract_2,
+                fx_hedge,
+                contract_fx,
+                mult_1,
+                mult_2,
+                mult_fx,
+                "offset",
+                src1,
+                src2,
+                srcfx,
+                n_dec
+            FROM public.b1_spreads_inputs
+            """
+        )
+
         rows = cur.fetchall()
-        columns = [d[0] for d in cur.description]
 
-    df = pd.DataFrame(rows, columns=columns)
+    df = pd.DataFrame(
+        rows,
+        columns=[
+            "desc",
+            "contract_1",
+            "contract_2",
+            "fx_hedge",
+            "contract_fx",
+            "mult_1",
+            "mult_2",
+            "mult_fx",
+            "offset",
+            "src1",
+            "src2",
+            "srcfx",
+            "n_dec",
+        ],
+    )
+
+    if df.empty:
+        return df
 
     # --------------------------------------------------------
-    # Clean string columns
+    # TEXT
     # --------------------------------------------------------
 
-    string_cols = [
+    for col in [
         "desc",
         "contract_1",
         "contract_2",
@@ -69,9 +217,7 @@ def load_spreads_input():
         "src1",
         "src2",
         "srcfx",
-    ]
-
-    for col in string_cols:
+    ]:
         df[col] = (
             df[col]
             .fillna("")
@@ -80,463 +226,591 @@ def load_spreads_input():
         )
 
     # --------------------------------------------------------
-    # Numeric columns
+    # NUMBERS
     # --------------------------------------------------------
 
-    numeric_cols = [
+    for col in [
         "mult_1",
         "mult_2",
         "mult_fx",
         "offset",
-    ]
-
-    for col in numeric_cols:
+        "n_dec",
+    ]:
         df[col] = pd.to_numeric(
             df[col],
             errors="coerce",
         )
 
     # --------------------------------------------------------
-    # Boolean fx_hedge
+    # BOOLEAN
     # --------------------------------------------------------
 
-    def to_bool(value):
-
-        if isinstance(value, bool):
-            return value
-
-        return str(value).strip().lower() in {
-            "true",
-            "1",
-            "yes",
-            "y",
-            "t",
-        }
-
-    df["fx_hedge"] = df["fx_hedge"].apply(to_bool)
+    df["fx_hedge"] = (
+        df["fx_hedge"]
+        .apply(to_bool)
+    )
 
     return df
 
 
 # ============================================================
-# GET REQUIRED MARKET-DATA SOURCES
+# DETERMINE REQUIRED MARKET DATA
 # ============================================================
 
-def get_required_sources(df_inputs):
+def get_required_contracts(
+    spreads_input,
+):
     """
-    Build dictionary:
+    Returns:
 
         {
-            "md_snap": {"IB:CCZ6", ...},
-            "md_snap_moex": {"MX:CCX6", ...},
-            "md_snap_bb": {...},
+            "md_snap": {"IB:GCZ6", ...},
+            "md_snap_moex": {"MX:LKOH", ...},
             ...
         }
 
-    Only instruments actually required for spread calculations
-    are requested from Supabase.
+    Section rows are ignored.
     """
 
     required = {}
 
-    def add_source(table_name, contract):
+    if spreads_input.empty:
+        return required
 
-        table_name = str(table_name).strip()
-        contract = str(contract).strip()
+    for _, row in (
+        spreads_input.iterrows()
+    ):
 
-        if not table_name:
-            return
-
-        if not contract:
-            return
-
-        if table_name.lower() in {
-            "nan",
-            "none",
-        }:
-            return
-
-        if contract.lower() in {
-            "nan",
-            "none",
-        }:
-            return
-
-        if table_name not in required:
-            required[table_name] = set()
-
-        required[table_name].add(contract)
-
-    # --------------------------------------------------------
-    # Build required source list
-    # --------------------------------------------------------
-
-    for _, row in df_inputs.iterrows():
-
-        # Leg 1
-        add_source(
-            row["src1"],
-            row["contract_1"],
+        desc = clean_text(
+            row["desc"]
         )
 
-        # Leg 2
-        add_source(
-            row["src2"],
-            row["contract_2"],
+        # ----------------------------------------------------
+        # SECTION ROW
+        # ----------------------------------------------------
+
+        if is_section_row(desc):
+            continue
+
+        # ----------------------------------------------------
+        # CONTRACT 1
+        # ----------------------------------------------------
+
+        src1 = clean_text(
+            row["src1"]
         )
 
-        # FX source only when FX hedge is enabled
-        if row["fx_hedge"]:
+        contract_1 = clean_text(
+            row["contract_1"]
+        )
 
-            add_source(
-                row["srcfx"],
-                row["contract_fx"],
+        if (
+            src1 in ALLOWED_SOURCE_TABLES
+            and contract_1
+        ):
+            required.setdefault(
+                src1,
+                set(),
+            ).add(
+                contract_1
             )
+
+        # ----------------------------------------------------
+        # CONTRACT 2
+        # ----------------------------------------------------
+
+        src2 = clean_text(
+            row["src2"]
+        )
+
+        contract_2 = clean_text(
+            row["contract_2"]
+        )
+
+        if (
+            src2 in ALLOWED_SOURCE_TABLES
+            and contract_2
+        ):
+            required.setdefault(
+                src2,
+                set(),
+            ).add(
+                contract_2
+            )
+
+        # ----------------------------------------------------
+        # FX CONTRACT
+        # ----------------------------------------------------
+
+        if to_bool(
+            row["fx_hedge"]
+        ):
+
+            srcfx = clean_text(
+                row["srcfx"]
+            )
+
+            contract_fx = clean_text(
+                row["contract_fx"]
+            )
+
+            if (
+                srcfx
+                in ALLOWED_SOURCE_TABLES
+                and contract_fx
+            ):
+                required.setdefault(
+                    srcfx,
+                    set(),
+                ).add(
+                    contract_fx
+                )
 
     return required
 
 
 # ============================================================
-# VALIDATE SOURCE TABLE
+# LOAD LIVE MARKET DATA
 # ============================================================
 
-def validate_table_name(table_name):
+def load_market_table(
+    table_name,
+    contracts,
+):
     """
-    SQL table names cannot be passed as query parameters.
-
-    Therefore only explicitly permitted source tables can
-    be referenced.
-    """
-
-    if table_name not in ALLOWED_SOURCE_TABLES:
-
-        raise ValueError(
-            f"Unsupported market-data source table: "
-            f"{table_name}"
-        )
-
-
-# ============================================================
-# LOAD LIVE PRICES
-# Called again on every Streamlit refresh
-# ============================================================
-
-def load_live_prices(df_inputs):
-    """
-    Load bid/ask for all instruments required by the current
-    spread definitions.
+    Loads bid/ask from one approved Supabase table.
 
     Returns:
-
-        prices[(table_name, contract)] = {
-            "bid": ...,
-            "ask": ...,
-            "mid": ...
+        {
+            contract: {
+                "bid": ...,
+                "ask": ...,
+                "mid": ...
+            }
         }
     """
 
+    if (
+        table_name
+        not in ALLOWED_SOURCE_TABLES
+    ):
+        raise ValueError(
+            f"Unsupported source table: {table_name}"
+        )
+
+    if not contracts:
+        return {}
+
     conn = get_conn()
 
-    required = get_required_sources(df_inputs)
-
-    prices = {}
+    # Table name cannot be passed as a normal SQL parameter,
+    # therefore only whitelisted table names are accepted.
+    sql = f"""
+        SELECT
+            contract,
+            bid,
+            ask
+        FROM public.{table_name}
+        WHERE contract = ANY(%s)
+    """
 
     with conn.cursor() as cur:
+        cur.execute(
+            sql,
+            (
+                list(contracts),
+            ),
+        )
 
-        for table_name, contracts in required.items():
+        rows = cur.fetchall()
 
-            validate_table_name(table_name)
+    result = {}
 
-            contracts = list(contracts)
+    for (
+        contract,
+        bid,
+        ask,
+    ) in rows:
 
-            if not contracts:
-                continue
+        contract = clean_text(
+            contract
+        )
 
-            sql = f"""
-                SELECT
-                    contract,
-                    bid,
-                    ask
-                FROM public.{table_name}
-                WHERE contract = ANY(%s)
-            """
+        bid = to_float(
+            bid
+        )
 
-            cur.execute(
-                sql,
-                (contracts,),
-            )
+        ask = to_float(
+            ask
+        )
 
-            rows = cur.fetchall()
+        if (
+            bid is not None
+            and ask is not None
+        ):
+            mid = (
+                bid + ask
+            ) / 2.0
 
-            for contract, bid, ask in rows:
+        elif bid is not None:
+            mid = bid
 
-                bid = pd.to_numeric(
-                    bid,
-                    errors="coerce",
-                )
+        elif ask is not None:
+            mid = ask
 
-                ask = pd.to_numeric(
-                    ask,
-                    errors="coerce",
-                )
+        else:
+            mid = None
 
-                # --------------------------------------------
-                # Mid price
-                # --------------------------------------------
+        result[
+            contract
+        ] = {
+            "bid": bid,
+            "ask": ask,
+            "mid": mid,
+        }
 
-                if (
-                    pd.notna(bid)
-                    and pd.notna(ask)
-                ):
-
-                    mid = (
-                        float(bid)
-                        + float(ask)
-                    ) / 2
-
-                else:
-
-                    mid = None
-
-                prices[
-                    (table_name, contract)
-                ] = {
-                    "bid": bid,
-                    "ask": ask,
-                    "mid": mid,
-                }
-
-    return prices
+    return result
 
 
-# ============================================================
-# GET MID PRICE
-# ============================================================
-
-def get_mid(
-    prices,
-    table_name,
-    contract,
+def load_all_market_data(
+    spreads_input,
 ):
     """
-    Return mid price for a specific
-    source-table / contract pair.
+    Load only the contracts required by the
+    current spread definitions.
     """
 
-    table_name = str(table_name).strip()
-    contract = str(contract).strip()
-
-    data = prices.get(
-        (
-            table_name,
-            contract,
+    required = (
+        get_required_contracts(
+            spreads_input
         )
     )
 
-    if data is None:
-        return None
+    market_data = {}
 
-    return data["mid"]
+    for (
+        table_name,
+        contracts,
+    ) in required.items():
+
+        market_data[
+            table_name
+        ] = load_market_table(
+            table_name,
+            contracts,
+        )
+
+    return market_data
 
 
 # ============================================================
-# NUMBER FORMATTING
+# MARKET PRICE LOOKUP
 # ============================================================
 
-def format_price(value):
-    """
-    Source prices:
+def get_price(
+    market_data,
+    source,
+    contract,
+):
+    source = clean_text(
+        source
+    )
 
-    show up to 6 decimals,
-    remove unnecessary trailing zeros.
-    """
+    contract = clean_text(
+        contract
+    )
 
-    if value is None:
-        return ""
+    if (
+        not source
+        or not contract
+    ):
+        return {
+            "bid": None,
+            "ask": None,
+            "mid": None,
+        }
 
-    if pd.isna(value):
-        return ""
+    source_data = (
+        market_data.get(
+            source,
+            {},
+        )
+    )
 
-    return (
-        f"{float(value):,.6f}"
-        .rstrip("0")
-        .rstrip(".")
+    return source_data.get(
+        contract,
+        {
+            "bid": None,
+            "ask": None,
+            "mid": None,
+        },
     )
 
 
-def format_spread(value):
-    """
-    Spread always displayed with 2 decimals.
-    """
-
-    if value is None:
-        return ""
-
-    if pd.isna(value):
-        return ""
-
-    return f"{float(value):,.2f}"
-
-
 # ============================================================
-# BUILD SPREAD TABLE
+# CALCULATE SPREADS
 # ============================================================
 
-def build_spreads_table(
-    df_inputs,
-    prices,
+def calculate_spreads(
+    spreads_input,
+    market_data,
 ):
+    """
+    Spread:
+
+        mid1 * mult_1
+        - mid2 * mult_2 / FX
+        + offset
+
+    where:
+
+        FX = fx_mid * mult_fx
+
+    if fx_hedge = False:
+
+        FX = 1
+
+    Section rows are returned as structural rows
+    and are not calculated.
+    """
 
     output_rows = []
 
-    for _, row in df_inputs.iterrows():
+    if spreads_input.empty:
+        return pd.DataFrame()
 
-        # ====================================================
-        # LEG 1
-        # ====================================================
+    for _, row in (
+        spreads_input.iterrows()
+    ):
 
-        mid1 = get_mid(
-            prices,
-            row["src1"],
-            row["contract_1"],
+        desc = clean_text(
+            row["desc"]
         )
 
         # ====================================================
-        # LEG 2
+        # SECTION ROW
         # ====================================================
 
-        mid2 = get_mid(
-            prices,
-            row["src2"],
-            row["contract_2"],
-        )
+        if is_section_row(desc):
 
-        # ====================================================
-        # FX
-        # ====================================================
+            output_rows.append(
+                {
+                    "desc": (
+                        get_section_name(
+                            desc
+                        )
+                    ),
+                    "spread": "",
+                    "n_dec": None,
+                    "is_section": True,
 
-        fx_mid = None
+                    "contract_1": "",
+                    "src1": "",
+                    "bid1": None,
+                    "ask1": None,
+                    "mid1": None,
 
-        # Default: no FX conversion
-        fx_divisor = 1.0
+                    "contract_2": "",
+                    "src2": "",
+                    "bid2": None,
+                    "ask2": None,
+                    "mid2": None,
 
-        if row["fx_hedge"]:
-
-            fx_mid = get_mid(
-                prices,
-                row["srcfx"],
-                row["contract_fx"],
+                    "contract_fx": "",
+                    "srcfx": "",
+                    "fx_bid": None,
+                    "fx_ask": None,
+                    "fx_mid": None,
+                }
             )
 
-            if (
-                fx_mid is not None
-                and pd.notna(fx_mid)
-                and pd.notna(row["mult_fx"])
-            ):
+            continue
 
-                fx_divisor = (
-                    float(fx_mid)
-                    * float(row["mult_fx"])
+        # ====================================================
+        # NORMAL SPREAD ROW
+        # ====================================================
+
+        contract_1 = clean_text(
+            row["contract_1"]
+        )
+
+        contract_2 = clean_text(
+            row["contract_2"]
+        )
+
+        contract_fx = clean_text(
+            row["contract_fx"]
+        )
+
+        src1 = clean_text(
+            row["src1"]
+        )
+
+        src2 = clean_text(
+            row["src2"]
+        )
+
+        srcfx = clean_text(
+            row["srcfx"]
+        )
+
+        fx_hedge = to_bool(
+            row["fx_hedge"]
+        )
+
+        mult_1 = to_float(
+            row["mult_1"]
+        )
+
+        mult_2 = to_float(
+            row["mult_2"]
+        )
+
+        mult_fx = to_float(
+            row["mult_fx"]
+        )
+
+        offset = to_float(
+            row["offset"]
+        )
+
+        n_dec = normalize_n_dec(
+            row["n_dec"]
+        )
+
+        # Defaults
+        if mult_1 is None:
+            mult_1 = 1.0
+
+        if mult_2 is None:
+            mult_2 = 1.0
+
+        if mult_fx is None:
+            mult_fx = 1.0
+
+        if offset is None:
+            offset = 0.0
+
+        # ----------------------------------------------------
+        # CONTRACT 1
+        # ----------------------------------------------------
+
+        p1 = get_price(
+            market_data,
+            src1,
+            contract_1,
+        )
+
+        mid1 = p1["mid"]
+
+        # ----------------------------------------------------
+        # CONTRACT 2
+        # ----------------------------------------------------
+
+        p2 = get_price(
+            market_data,
+            src2,
+            contract_2,
+        )
+
+        mid2 = p2["mid"]
+
+        # ----------------------------------------------------
+        # FX
+        # ----------------------------------------------------
+
+        fx_bid = None
+        fx_ask = None
+        fx_mid = None
+
+        fx_value = 1.0
+
+        if fx_hedge:
+
+            pfx = get_price(
+                market_data,
+                srcfx,
+                contract_fx,
+            )
+
+            fx_bid = pfx[
+                "bid"
+            ]
+
+            fx_ask = pfx[
+                "ask"
+            ]
+
+            fx_mid = pfx[
+                "mid"
+            ]
+
+            if fx_mid is not None:
+                fx_value = (
+                    fx_mid
+                    * mult_fx
                 )
-
             else:
+                fx_value = None
 
-                fx_divisor = None
-
-        # ====================================================
-        # CALCULATE SPREAD
-        #
-        # spread =
-        #
-        #     mid1 * mult_1
-        #
-        #     -
-        #
-        #     mid2 * mult_2
-        #     -----------------
-        #     FX
-        #
-        #     +
-        #
-        #     offset
-        #
-        #
-        # FX =
-        #
-        #     fx_mid * mult_fx
-        #
-        # when fx_hedge = TRUE
-        #
-        # otherwise:
-        #
-        #     FX = 1
-        # ====================================================
+        # ----------------------------------------------------
+        # SPREAD
+        # ----------------------------------------------------
 
         spread = None
 
         if (
             mid1 is not None
             and mid2 is not None
-            and pd.notna(mid1)
-            and pd.notna(mid2)
-            and pd.notna(row["mult_1"])
-            and pd.notna(row["mult_2"])
-            and pd.notna(row["offset"])
-            and fx_divisor is not None
-            and fx_divisor != 0
+            and fx_value is not None
+            and fx_value != 0
         ):
-
             spread = (
-                float(mid1)
-                * float(row["mult_1"])
-
-                -
-
-                (
-                    float(mid2)
-                    * float(row["mult_2"])
-                    / float(fx_divisor)
+                mid1
+                * mult_1
+                - (
+                    mid2
+                    * mult_2
+                    / fx_value
                 )
-
-                +
-
-                float(row["offset"])
+                + offset
             )
-
-        # ====================================================
-        # SOURCE COLUMNS
-        # ====================================================
-
-        src1 = row["contract_1"]
-        src2 = row["contract_2"]
-
-        if row["fx_hedge"]:
-
-            srcfx = row["contract_fx"]
-            fx_display = fx_mid
-
-        else:
-
-            srcfx = ""
-            fx_display = None
-
-        # ====================================================
-        # OUTPUT ROW
-        # ====================================================
 
         output_rows.append(
             {
-                "spread name": row["desc"],
+                "desc": desc,
+
+                # Keep the actual number here.
                 "spread": spread,
 
+                "n_dec": n_dec,
+                "is_section": False,
+
+                "contract_1": contract_1,
                 "src1": src1,
-                "src1_px": mid1,
+                "bid1": p1["bid"],
+                "ask1": p1["ask"],
+                "mid1": mid1,
 
+                "contract_2": contract_2,
                 "src2": src2,
-                "src2_px": mid2,
+                "bid2": p2["bid"],
+                "ask2": p2["ask"],
+                "mid2": mid2,
 
-                "srcfx": srcfx,
-                "fx": fx_display,
+                "contract_fx": (
+                    contract_fx
+                    if fx_hedge
+                    else ""
+                ),
+                "srcfx": (
+                    srcfx
+                    if fx_hedge
+                    else ""
+                ),
+                "fx_bid": fx_bid,
+                "fx_ask": fx_ask,
+                "fx_mid": fx_mid,
             }
         )
 
@@ -546,57 +820,224 @@ def build_spreads_table(
 
 
 # ============================================================
-# TABLE STYLING
+# DISPLAY TABLE
 # ============================================================
 
-def style_spreads_table(df):
+def build_spreads_display(
+    calculated,
+    show_sources,
+):
+    if calculated.empty:
+        return pd.DataFrame()
 
-    # --------------------------------------------------------
-    # Only format columns that are currently displayed
-    # --------------------------------------------------------
+    rows = []
 
-    format_dict = {}
+    for _, row in (
+        calculated.iterrows()
+    ):
 
-    if "spread" in df.columns:
-        format_dict["spread"] = format_spread
+        is_section = bool(
+            row["is_section"]
+        )
 
-    if "src1_px" in df.columns:
-        format_dict["src1_px"] = format_price
+        # ====================================================
+        # SECTION ROW
+        # ====================================================
 
-    if "src2_px" in df.columns:
-        format_dict["src2_px"] = format_price
+        if is_section:
 
-    if "fx" in df.columns:
-        format_dict["fx"] = format_price
+            item = {
+                "description": (
+                    clean_text(
+                        row["desc"]
+                    )
+                ),
+                "spread": "",
+            }
 
-    # --------------------------------------------------------
-    # Styling
-    # --------------------------------------------------------
+            if show_sources:
+
+                item.update(
+                    {
+                        "contract 1": "",
+                        "src 1": "",
+                        "mid 1": "",
+                        "contract 2": "",
+                        "src 2": "",
+                        "mid 2": "",
+                        "FX contract": "",
+                        "FX src": "",
+                        "FX mid": "",
+                    }
+                )
+
+            rows.append(
+                item
+            )
+
+            continue
+
+        # ====================================================
+        # NORMAL ROW
+        # ====================================================
+
+        item = {
+            "description": (
+                clean_text(
+                    row["desc"]
+                )
+            ),
+
+            "spread": (
+                format_spread(
+                    row["spread"],
+                    row["n_dec"],
+                )
+            ),
+        }
+
+        if show_sources:
+
+            item.update(
+                {
+                    "contract 1": (
+                        clean_text(
+                            row[
+                                "contract_1"
+                            ]
+                        )
+                    ),
+
+                    "src 1": (
+                        clean_text(
+                            row[
+                                "src1"
+                            ]
+                        )
+                    ),
+
+                    "mid 1": (
+                        format_price(
+                            row[
+                                "mid1"
+                            ]
+                        )
+                    ),
+
+                    "contract 2": (
+                        clean_text(
+                            row[
+                                "contract_2"
+                            ]
+                        )
+                    ),
+
+                    "src 2": (
+                        clean_text(
+                            row[
+                                "src2"
+                            ]
+                        )
+                    ),
+
+                    "mid 2": (
+                        format_price(
+                            row[
+                                "mid2"
+                            ]
+                        )
+                    ),
+
+                    "FX contract": (
+                        clean_text(
+                            row[
+                                "contract_fx"
+                            ]
+                        )
+                    ),
+
+                    "FX src": (
+                        clean_text(
+                            row[
+                                "srcfx"
+                            ]
+                        )
+                    ),
+
+                    "FX mid": (
+                        format_price(
+                            row[
+                                "fx_mid"
+                            ]
+                        )
+                    ),
+                }
+            )
+
+        rows.append(
+            item
+        )
+
+    return pd.DataFrame(
+        rows
+    )
+
+
+# ============================================================
+# STYLE
+# ============================================================
+
+def style_spreads_table(
+    display_df,
+    calculated_df,
+):
+    if display_df.empty:
+        return display_df.style
+
+    section_indexes = []
+
+    for idx, row in (
+        calculated_df
+        .reset_index(drop=True)
+        .iterrows()
+    ):
+        if bool(
+            row["is_section"]
+        ):
+            section_indexes.append(
+                idx
+            )
+
+    def style_row(row):
+
+        if (
+            row.name
+            in section_indexes
+        ):
+            return [
+                (
+                    "font-weight: bold; "
+                    "text-align: left;"
+                    if col
+                    == "description"
+                    else ""
+                )
+                for col
+                in row.index
+            ]
+
+        return [
+            ""
+            for _ in row.index
+        ]
 
     styler = (
-        df.style
-
-        .format(
-            format_dict
-        )
-
-        # Centre all table cells
+        display_df.style
         .set_properties(
             **{
                 "text-align": "center",
             }
         )
-
-        # Spread name bold
-        .set_properties(
-            subset=["spread name"],
-            **{
-                "font-weight": "bold",
-                "text-align": "center",
-            }
-        )
-
-        # Centre headers
         .set_table_styles(
             [
                 {
@@ -610,7 +1051,55 @@ def style_spreads_table(df):
                 }
             ]
         )
+        .apply(
+            style_row,
+            axis=1,
+        )
     )
+
+    # --------------------------------------------------------
+    # NORMAL DESCRIPTION COLUMN
+    # --------------------------------------------------------
+
+    if (
+        "description"
+        in display_df.columns
+    ):
+        styler = (
+            styler
+            .set_properties(
+                subset=[
+                    "description"
+                ],
+                **{
+                    "text-align": (
+                        "left"
+                    ),
+                },
+            )
+        )
+
+    # --------------------------------------------------------
+    # SPREAD BOLD
+    # --------------------------------------------------------
+
+    if (
+        "spread"
+        in display_df.columns
+    ):
+        styler = (
+            styler
+            .set_properties(
+                subset=[
+                    "spread"
+                ],
+                **{
+                    "font-weight": (
+                        "bold"
+                    ),
+                },
+            )
+        )
 
     return styler
 
@@ -621,107 +1110,101 @@ def style_spreads_table(df):
 
 def render_spreads_page():
 
-    # ========================================================
+    st.subheader(
+        "Spreads"
+    )
+
+    # --------------------------------------------------------
     # INPUT DEFINITIONS
     #
-    # Cached once per application process
-    # ========================================================
+    # Cached once.
+    # --------------------------------------------------------
 
-    df_inputs = load_spreads_input()
-
-    # ========================================================
-    # LIVE PRICES
-    #
-    # This runs again every time Streamlit refreshes.
-    #
-    # main.py already controls the refresh interval.
-    # ========================================================
-
-    prices = load_live_prices(
-        df_inputs
+    df_inputs = (
+        load_spreads_input()
     )
 
-    # ========================================================
-    # CALCULATE SPREADS
-    # ========================================================
+    if df_inputs.empty:
 
-    df = build_spreads_table(
-        df_inputs,
-        prices,
-    )
+        st.warning(
+            "No spread definitions found in b1_spreads_inputs."
+        )
 
-    # ========================================================
-    # SHOW / HIDE SOURCE DETAILS
-    # ========================================================
+        return
 
-    show_sources = st.toggle(
-        "Show sources",
-        value=False,
-    )
-
-    # ========================================================
-    # DISPLAY COLUMNS
-    # ========================================================
-
-    if show_sources:
-
-        display_df = df[
-            [
-                "spread name",
-                "spread",
-
-                "src1",
-                "src1_px",
-
-                "src2",
-                "src2_px",
-
-                "srcfx",
-                "fx",
-            ]
-        ]
-
-    else:
-
-        display_df = df[
-            [
-                "spread name",
-                "spread",
-            ]
-        ]
-
-    # ========================================================
-    # TABLE HEIGHT
+    # --------------------------------------------------------
+    # LIVE MARKET DATA
     #
-    # Dynamically sized so all rows are visible without
-    # needing to expand or vertically scroll the table.
-    # ========================================================
+    # Not cached here, so it refreshes with the page.
+    # --------------------------------------------------------
 
-    table_height = (
+    market_data = (
+        load_all_market_data(
+            df_inputs
+        )
+    )
+
+    # --------------------------------------------------------
+    # CALCULATE
+    # --------------------------------------------------------
+
+    calculated = (
+        calculate_spreads(
+            df_inputs,
+            market_data,
+        )
+    )
+
+    # --------------------------------------------------------
+    # OPTIONS
+    # --------------------------------------------------------
+
+    show_sources = (
+        st.toggle(
+            "Show sources",
+            value=False,
+            key=(
+                "spreads_"
+                "show_sources"
+            ),
+        )
+    )
+
+    # --------------------------------------------------------
+    # DISPLAY
+    # --------------------------------------------------------
+
+    display_df = (
+        build_spreads_display(
+            calculated,
+            show_sources,
+        )
+    )
+
+    styled = (
+        style_spreads_table(
+            display_df,
+            calculated,
+        )
+    )
+
+    table_width = (
+        1250
+        if show_sources
+        else 500
+    )
+
+    table_height = min(
         38
-        + len(display_df) * 35
+        + len(
+            display_df
+        )
+        * 35,
+        900,
     )
-
-    # ========================================================
-    # TABLE WIDTH
-    #
-    # Keep normal view compact.
-    # Allow more space when source information is visible.
-    # ========================================================
-
-    if show_sources:
-        table_width = 1050
-    else:
-        table_width = 450
-
-    # ========================================================
-    # DISPLAY TABLE
-    # ========================================================
 
     st.dataframe(
-        style_spreads_table(
-            display_df
-        ),
+        styled,
         hide_index=True,
         use_container_width=False,
         width=table_width,
