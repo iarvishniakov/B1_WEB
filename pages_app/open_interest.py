@@ -32,9 +32,9 @@ def mx_contract(contract):
     Add MX: prefix used in md_snap_moex.
 
     Examples:
-        SiZ6  -> MX:SiZ6
-        MXZ6  -> MX:MXZ6
-        MX:SiZ6 -> MX:SiZ6
+        SiZ6     -> MX:SiZ6
+        MXZ6     -> MX:MXZ6
+        MX:SiZ6  -> MX:SiZ6
     """
 
     contract = clean_text(
@@ -55,18 +55,14 @@ def mx_contract(contract):
 # ============================================================
 # INPUT DATA
 #
-# b1_oi_input is reference/static data, so it is cached.
+# IMPORTANT:
+# This is deliberately NOT cached.
 #
-# Expected columns:
-#
-# und
-# contract_front
-# contract_back
-# front_oi_reset
-# back_oi_reset
+# front_oi_reset / back_oi_reset may be changed by a scheduled
+# database job, so we want to read the latest values on every
+# Streamlit refresh.
 # ============================================================
 
-@st.cache_resource
 def load_oi_inputs():
     conn = get_conn()
 
@@ -100,7 +96,7 @@ def load_oi_inputs():
         return df
 
     # --------------------------------------------------------
-    # TEXT COLUMNS
+    # TEXT
     # --------------------------------------------------------
 
     for col in [
@@ -116,7 +112,7 @@ def load_oi_inputs():
         )
 
     # --------------------------------------------------------
-    # NUMERIC COLUMNS
+    # NUMERIC
     # --------------------------------------------------------
 
     for col in [
@@ -134,27 +130,23 @@ def load_oi_inputs():
 # ============================================================
 # LIVE OPEN INTEREST
 #
-# md_snap_moex is NOT cached.
-# It will therefore update with the page refresh.
+# Current OI comes from:
+#
+#     public.md_snap_moex.open_interest
+#
+# Matching:
+#
+#     b1_oi_input.contract_front/back
+#
+# becomes:
+#
+#     "MX:" + contract
+#
 # ============================================================
 
 def load_live_open_interest(
     oi_inputs,
 ):
-    """
-    Reads current open_interest from md_snap_moex.
-
-    Returns:
-
-        {
-            "MX:SIZ6": 10838142,
-            "MX:SIH7": 96432,
-            ...
-        }
-
-    Dictionary keys are uppercase to make matching robust.
-    """
-
     if oi_inputs.empty:
         return {}
 
@@ -234,6 +226,8 @@ def load_live_open_interest(
             open_interest
         )
 
+        # Uppercase dictionary key makes subsequent
+        # matching case-insensitive.
         result[
             contract.upper()
         ] = open_interest
@@ -270,8 +264,6 @@ def calculate_oi_leg(
     reset_oi,
 ):
     """
-    Calculate one futures leg.
-
     OI:
         current open interest
 
@@ -441,7 +433,10 @@ def calculate_open_interest(
 
 def fmt_oi(value):
     """
-    10838142 -> 10,838,142
+    Examples:
+
+        10838142 -> 10,838,142
+        96432    -> 96,432
     """
 
     if (
@@ -455,10 +450,10 @@ def fmt_oi(value):
 
 def fmt_oi_change(value):
     """
-    Positive values have explicit + sign.
+    No + sign for positive values.
 
-    1000  -> +1,000
-    -1000 -> -1,000
+        1000  -> 1,000
+        -1000 -> -1,000
     """
 
     if (
@@ -467,12 +462,18 @@ def fmt_oi_change(value):
     ):
         return ""
 
-    return f"{value:+,.0f}"
+    return f"{value:,.0f}"
 
 
 def fmt_pct(value):
     """
-    0.1445 -> +14.45%
+    Percentage with NO decimal places
+    and NO + sign for positive values.
+
+        0.0125   -> 1%
+        0.1445   -> 14%
+        -0.0125  -> -1%
+        -12.4279 -> -1243%
     """
 
     if (
@@ -481,19 +482,17 @@ def fmt_pct(value):
     ):
         return ""
 
-    return f"{value:+.2%}"
+    return f"{value:.0%}"
 
 
 # ============================================================
 # BUILD DISPLAY TABLE
 #
-# Uses a Pandas MultiIndex for TRUE grouped headers:
+# MultiIndex gives us genuine grouped headers:
 #
-#                  Front                       Back
-# und      oi      oich    oi ch %     oi      oich    oi ch %
+#                     Front                       Back
+# und       oi       oich    oi ch %      oi       oich    oi ch %
 #
-# This means Front / Back are part of the table itself,
-# rather than separate Streamlit objects.
 # ============================================================
 
 def build_oi_display(
@@ -510,10 +509,12 @@ def build_oi_display(
                 "Front",
                 "oi",
             ),
+
             (
                 "Front",
                 "oich",
             ),
+
             (
                 "Front",
                 "oi ch %",
@@ -523,10 +524,12 @@ def build_oi_display(
                 "Back",
                 "oi",
             ),
+
             (
                 "Back",
                 "oich",
             ),
+
             (
                 "Back",
                 "oi ch %",
@@ -547,6 +550,10 @@ def build_oi_display(
 
         data.append(
             [
+                # --------------------------------------------
+                # UNDERLYING
+                # --------------------------------------------
+
                 clean_text(
                     row["und"]
                 ),
@@ -610,11 +617,33 @@ def build_oi_display(
 def style_oi_table(
     df,
 ):
+    def negative_red(value):
+        """
+        Formatted negative values start with "-".
+
+        Examples:
+
+            -72,206
+            -12%
+            -1243%
+
+        Positive values remain normal.
+        """
+
+        value = str(
+            value
+        ).strip()
+
+        if value.startswith("-"):
+            return "color: red;"
+
+        return ""
+
     styler = (
         df.style
 
         # ----------------------------------------------------
-        # ALL CELLS CENTERED
+        # CENTER ALL DATA
         # ----------------------------------------------------
 
         .set_properties(
@@ -626,7 +655,7 @@ def style_oi_table(
         )
 
         # ----------------------------------------------------
-        # HEADERS CENTERED
+        # CENTER HEADERS
         # ----------------------------------------------------
 
         .set_table_styles(
@@ -670,6 +699,47 @@ def style_oi_table(
             )
         )
 
+    # --------------------------------------------------------
+    # NEGATIVE OI CHANGES -> RED
+    #
+    # Front + Back
+    # --------------------------------------------------------
+
+    negative_columns = [
+        (
+            "Front",
+            "oich",
+        ),
+        (
+            "Front",
+            "oi ch %",
+        ),
+        (
+            "Back",
+            "oich",
+        ),
+        (
+            "Back",
+            "oi ch %",
+        ),
+    ]
+
+    for column in (
+        negative_columns
+    ):
+
+        if column in df.columns:
+
+            styler = (
+                styler
+                .map(
+                    negative_red,
+                    subset=[
+                        column
+                    ],
+                )
+            )
+
     return styler
 
 
@@ -684,9 +754,13 @@ def render_open_interest_page():
     )
 
     # ========================================================
-    # INPUT DEFINITIONS
+    # INPUTS + RESET VALUES
     #
-    # Cached reference data.
+    # NOT CACHED.
+    #
+    # This means that if the scheduled Supabase job changes
+    # front_oi_reset / back_oi_reset, the new values will be
+    # picked up on the next dashboard refresh.
     # ========================================================
 
     oi_inputs = (
@@ -702,9 +776,9 @@ def render_open_interest_page():
         return
 
     # ========================================================
-    # LIVE OPEN INTEREST
+    # LIVE CURRENT OPEN INTEREST
     #
-    # NOT cached.
+    # Also NOT cached.
     # ========================================================
 
     live_oi = (
@@ -725,7 +799,7 @@ def render_open_interest_page():
     )
 
     # ========================================================
-    # DISPLAY
+    # BUILD DISPLAY
     # ========================================================
 
     display_df = (
@@ -733,6 +807,10 @@ def render_open_interest_page():
             calculated
         )
     )
+
+    # ========================================================
+    # TABLE
+    # ========================================================
 
     st.dataframe(
         style_oi_table(
