@@ -1,0 +1,58 @@
+B1_WEB A1 fallback refactor
+===========================
+
+New files
+---------
+market_data_service.py
+pages_app/settings.py
+
+Persistent setting
+------------------
+The app creates public.b1_settings automatically (if DB role permits DDL) and stores:
+  overwrite_ib_with_a1 = true/false
+
+IB fallback rule
+----------------
+Raw public.md_snap is never modified.
+IB is considered unusable for fallback when:
+- bid/ask missing
+- bid/ask <= 0
+- bid > ask
+- delayed = 'd'
+- snapshot_at missing/invalid
+- snapshot_at older than 90 seconds
+
+When override is ON and matching a1_md_all MTM is available and positive:
+- effective bid = MTM
+- effective ask = MTM
+- delayed = 'a1'
+- effective_source = 'A1'
+
+A1 aliases IBKR:* and IB:* are normalized to IB:*.
+Trade status remains the IB trade status; A1 fixes market data, not whether the exchange is open.
+
+Refactored consumers
+--------------------
+- Models
+- Spreads
+- Curves (live price loader)
+- Russian SSF Rates
+- Market Data
+- Price Mapping status lookup
+
+Pages using only MOEX data (Index Arb, Open Interest, RFLB Curve) were intentionally left unchanged.
+
+Settings page
+-------------
+Sidebar -> Settings -> Market Data Control
+Shows:
+- IB delayed/stalled
+- Replaced from A1
+- Still invalid
+- expandable instrument diagnostics
+
+Important
+---------
+b1_price_mapping remains a database-derived mapping table. Its IB source status display now uses the
+effective IB/A1 feed. The mapping table's own bid/ask values are not synthetically recomputed in Python,
+because its database mapping formula should remain the source of truth.
