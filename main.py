@@ -13,6 +13,7 @@ from pages_app.market_data import render_market_data_page
 from pages_app.ru_ssf_rates import render_ru_ssf_rates_page
 from pages_app.rflb_curve import render_rflb_curve_page
 from pages_app.models import render_models_page
+from pages_app.settings import render_settings_page
 
 # ============================================================
 # PAGE CONFIG
@@ -53,6 +54,7 @@ page = st.sidebar.radio(
         "Price Mapping",
         "Market Data",
         "Models",
+        "Settings",
     ],
     index=0,
 )
@@ -100,6 +102,9 @@ try:
 
     elif page == "Models":
         render_models_page()
+
+    elif page == "Settings":
+        render_settings_page()
 
 
 except Exception as e:

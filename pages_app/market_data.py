@@ -2,6 +2,7 @@ import pandas as pd
 import streamlit as st
 
 from db import get_conn
+from market_data_service import load_market_table as load_effective_market_table
 
 
 # ============================================================
@@ -65,165 +66,29 @@ def get_market_data_table_columns():
 # ============================================================
 
 def load_market_data():
-    """
-    Load current data from:
-
-        md_snap
-        md_snap_bb
-        md_snap_moex
-        md_snap_hl
-        b1_price_mapping
-
-    This function is deliberately NOT cached because market
-    prices should update on every global Streamlit refresh.
-    """
-
-    conn = get_conn()
-
-    table_columns = get_market_data_table_columns()
-
+    """Load all live tables; md_snap is the effective IB/A1 feed."""
     frames = []
-
-    with conn.cursor() as cur:
-
-        for table_name in MARKET_DATA_TABLES:
-
-            columns = table_columns.get(
-                table_name,
-                set(),
-            )
-
-            # -----------------------------------------------
-            # Minimum required fields
-            # -----------------------------------------------
-
-            if "contract" not in columns:
-                continue
-
-            if "bid" not in columns:
-                continue
-
-            if "ask" not in columns:
-                continue
-
-            # -----------------------------------------------
-            # Some tables may not contain these columns
-            # -----------------------------------------------
-
-            if "trade_status" in columns:
-                trade_status_sql = "trade_status"
-            else:
-                trade_status_sql = "NULL::text AS trade_status"
-
-            if "delayed" in columns:
-                delayed_sql = "delayed"
-            else:
-                delayed_sql = "NULL::text AS delayed"
-
-            # -----------------------------------------------
-            # Query
-            # -----------------------------------------------
-
-            sql = f"""
-                SELECT
-                    contract,
-                    bid,
-                    ask,
-                    {trade_status_sql},
-                    {delayed_sql}
-                FROM public.{table_name}
-            """
-
-            cur.execute(sql)
-
-            rows = cur.fetchall()
-
-            if not rows:
-                continue
-
-            df = pd.DataFrame(
-                rows,
-                columns=[
-                    "contract",
-                    "bid",
-                    "ask",
-                    "trade status",
-                    "delayed",
-                ],
-            )
-
-            frames.append(df)
-
-    # ========================================================
-    # COMBINE
-    # ========================================================
-
+    for table_name in MARKET_DATA_TABLES:
+        df0 = load_effective_market_table(table_name)
+        if df0.empty or not {"contract", "bid", "ask"}.issubset(df0.columns):
+            continue
+        df = pd.DataFrame({
+            "contract": df0["contract"],
+            "bid": df0["bid"],
+            "ask": df0["ask"],
+            "trade status": df0["trade_status"] if "trade_status" in df0.columns else "",
+            "delayed": df0["delayed"] if "delayed" in df0.columns else "",
+        })
+        frames.append(df)
     if not frames:
-
-        return pd.DataFrame(
-            columns=[
-                "contract",
-                "bid",
-                "ask",
-                "trade status",
-                "delayed",
-            ]
-        )
-
-    df = pd.concat(
-        frames,
-        ignore_index=True,
-    )
-
-    # ========================================================
-    # CLEAN DATA
-    # ========================================================
-
-    df["contract"] = (
-        df["contract"]
-        .fillna("")
-        .astype(str)
-        .str.strip()
-    )
-
-    df["bid"] = pd.to_numeric(
-        df["bid"],
-        errors="coerce",
-    )
-
-    df["ask"] = pd.to_numeric(
-        df["ask"],
-        errors="coerce",
-    )
-
-    df["trade status"] = (
-        df["trade status"]
-        .fillna("")
-        .astype(str)
-        .str.strip()
-    )
-
-    df["delayed"] = (
-        df["delayed"]
-        .fillna("")
-        .astype(str)
-        .str.strip()
-    )
-
-    # ========================================================
-    # SORT BY CONTRACT
-    # ========================================================
-
-    df = (
-        df
-        .sort_values(
-            by="contract",
-            key=lambda x: x.str.lower(),
-        )
-        .reset_index(drop=True)
-    )
-
-    return df
+        return pd.DataFrame(columns=["contract", "bid", "ask", "trade status", "delayed"])
+    df = pd.concat(frames, ignore_index=True)
+    df["contract"] = df["contract"].fillna("").astype(str).str.strip()
+    df["bid"] = pd.to_numeric(df["bid"], errors="coerce")
+    df["ask"] = pd.to_numeric(df["ask"], errors="coerce")
+    df["trade status"] = df["trade status"].fillna("").astype(str).str.strip()
+    df["delayed"] = df["delayed"].fillna("").astype(str).str.strip()
+    return df.sort_values(by="contract", key=lambda x: x.str.lower()).reset_index(drop=True)
 
 
 # ============================================================

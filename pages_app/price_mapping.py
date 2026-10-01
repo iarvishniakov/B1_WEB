@@ -2,6 +2,7 @@ import pandas as pd
 import streamlit as st
 
 from db import get_conn
+from market_data_service import get_effective_ib_data
 from formatters import fmt_auto
 
 
@@ -31,13 +32,7 @@ def load_price_mapping_data():
         FROM public.b1_price_mapping
     """
 
-    md_sql = """
-        SELECT
-            contract,
-            trade_status,
-            delayed
-        FROM public.md_snap
-    """
+
 
     with conn.cursor() as cur:
 
@@ -52,16 +47,10 @@ def load_price_mapping_data():
             columns=mapping_cols
         )
 
-        # md_snap
-        cur.execute(md_sql)
-
-        md_rows = cur.fetchall()
-        md_cols = [d[0] for d in cur.description]
-
-        df_md = pd.DataFrame(
-            md_rows,
-            columns=md_cols
-        )
+    # Effective IB feed: A1 replacements appear with delayed="a1".
+    df_md = get_effective_ib_data()
+    keep = [c for c in ["contract", "trade_status", "delayed"] if c in df_md.columns]
+    df_md = df_md[keep].copy() if keep else pd.DataFrame(columns=["contract", "trade_status", "delayed"])
 
     return df_mapping, df_md
 

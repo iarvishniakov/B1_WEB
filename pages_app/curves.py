@@ -3,6 +3,7 @@ import streamlit as st
 import altair as alt
 
 from db import get_conn
+from market_data_service import load_market_table as load_effective_market_table
 
 
 # ============================================================
@@ -238,112 +239,19 @@ def get_required_contracts(
 def load_curve_prices(
     curve_definitions,
 ):
-
-    conn = get_conn()
-
-    required_contracts = (
-        get_required_contracts(
-            curve_definitions
-        )
-    )
-
-    table_columns = (
-        get_market_data_columns()
-    )
-
+    required_contracts = get_required_contracts(curve_definitions)
     prices = {}
-
-    with conn.cursor() as cur:
-
-        for table_name in MARKET_DATA_TABLES:
-
-            columns = table_columns.get(
-                table_name,
-                set(),
-            )
-
-            # --------------------------------------------
-            # Required columns
-            # --------------------------------------------
-
-            if not {
-                "contract",
-                "bid",
-                "ask",
-            }.issubset(columns):
-
-                continue
-
-            # --------------------------------------------
-            # Only get contracts actually needed
-            # --------------------------------------------
-
-            sql = f"""
-                SELECT
-                    contract,
-                    bid,
-                    ask
-                FROM public.{table_name}
-                WHERE contract = ANY(%s)
-            """
-
-            cur.execute(
-                sql,
-                (
-                    list(
-                        required_contracts
-                    ),
-                ),
-            )
-
-            rows = cur.fetchall()
-
-            # --------------------------------------------
-            # Build price lookup
-            # --------------------------------------------
-
-            for contract, bid, ask in rows:
-
-                bid = pd.to_numeric(
-                    bid,
-                    errors="coerce",
-                )
-
-                ask = pd.to_numeric(
-                    ask,
-                    errors="coerce",
-                )
-
-                # ----------------------------------------
-                # Calculate mid
-                # ----------------------------------------
-
-                if (
-                    pd.notna(bid)
-                    and pd.notna(ask)
-                ):
-
-                    mid = (
-                        float(bid)
-                        + float(ask)
-                    ) / 2
-
-                else:
-
-                    mid = None
-
-                # ----------------------------------------
-                # Contract is our lookup key.
-                # ----------------------------------------
-
-                prices[
-                    str(contract).strip()
-                ] = {
-                    "bid": bid,
-                    "ask": ask,
-                    "mid": mid,
-                }
-
+    # Preserve the original table priority: later tables overwrite earlier ones.
+    for table_name in MARKET_DATA_TABLES:
+        df = load_effective_market_table(table_name, required_contracts)
+        if df.empty or not {"contract", "bid", "ask"}.issubset(df.columns):
+            continue
+        for _, row in df.iterrows():
+            contract = str(row.get("contract", "")).strip()
+            bid = pd.to_numeric(row.get("bid"), errors="coerce")
+            ask = pd.to_numeric(row.get("ask"), errors="coerce")
+            mid = (float(bid) + float(ask)) / 2 if pd.notna(bid) and pd.notna(ask) else None
+            prices[contract] = {"bid": bid, "ask": ask, "mid": mid}
     return prices
 
 

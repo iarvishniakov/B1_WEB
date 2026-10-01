@@ -10,6 +10,7 @@ import pandas as pd
 import streamlit as st
 
 from db import get_conn
+from market_data_service import load_market_table
 
 
 # ============================================================
@@ -180,11 +181,11 @@ def load_reference_data() -> dict[str, pd.DataFrame]:
 
 def load_live_data() -> dict[str, pd.DataFrame]:
     return {
-        "moex": read_table("md_snap_moex"),
-        "ib": read_table("md_snap"),
-        "bb": read_table("md_snap_bb"),
-        "hl": read_table("md_snap_hl"),
-        "mapping": read_table("b1_price_mapping"),
+        "moex": load_market_table("md_snap_moex"),
+        "ib": load_market_table("md_snap"),
+        "bb": load_market_table("md_snap_bb"),
+        "hl": load_market_table("md_snap_hl"),
+        "mapping": load_market_table("b1_price_mapping"),
     }
 
 
@@ -299,14 +300,17 @@ class MarketDataBook:
         md_ok, reasons = ok, ([] if ok else [reason])
 
         delayed = lower_text(r.get("delayed"))
+        is_a1 = delayed == "a1" or lower_text(r.get("effective_source")) == "a1"
         if delayed == "d":
             md_ok = False
             reasons.append("delayed")
 
-        fresh, fresh_reason = ib_snapshot_is_fresh(r.get("snapshot_at"))
-        if not fresh:
-            md_ok = False
-            reasons.append(fresh_reason)
+        # A1 is the accepted live fallback and does not inherit the stale IB timestamp.
+        if not is_a1:
+            fresh, fresh_reason = ib_snapshot_is_fresh(r.get("snapshot_at"))
+            if not fresh:
+                md_ok = False
+                reasons.append(fresh_reason)
 
         status = first_value(r, "trade_status", "trading_status")
         ts_ok = status_is_open(status)

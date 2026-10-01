@@ -5,6 +5,7 @@ import pandas as pd
 import streamlit as st
 
 from db import get_conn
+from market_data_service import load_market_table as load_effective_market_table
 
 
 # ============================================================
@@ -959,125 +960,28 @@ def get_market_data_columns():
 def load_live_ssf_prices(
     prepared,
 ):
-
     if prepared.empty:
         return {}
-
     required_contracts = set()
-
-    for col in [
-        "spot_md_contract",
-        "front_md_contract",
-        "back_md_contract",
-    ]:
-
-        required_contracts.update(
-            prepared[col]
-            .dropna()
-            .astype(str)
-            .str.strip()
-            .tolist()
-        )
-
-    required_contracts.discard(
-        ""
-    )
-
-    conn = get_conn()
-
-    table_columns = (
-        get_market_data_columns()
-    )
-
+    for col in ["spot_md_contract", "front_md_contract", "back_md_contract"]:
+        required_contracts.update(prepared[col].dropna().astype(str).str.strip().tolist())
+    required_contracts.discard("")
     prices = {}
-
-    with conn.cursor() as cur:
-
-        for table_name in MARKET_DATA_TABLES:
-
-            columns = table_columns.get(
-                table_name,
-                set(),
-            )
-
-            if not {
-                "contract",
-                "bid",
-                "ask",
-            }.issubset(columns):
-
-                continue
-
-            sql = f"""
-                SELECT
-                    contract,
-                    bid,
-                    ask
-                FROM public.{table_name}
-                WHERE contract = ANY(%s)
-            """
-
-            cur.execute(
-                sql,
-                (
-                    list(
-                        required_contracts
-                    ),
-                ),
-            )
-
-            rows = cur.fetchall()
-
-            for (
-                contract,
-                bid,
-                ask,
-            ) in rows:
-
-                bid = to_float(
-                    bid
-                )
-
-                ask = to_float(
-                    ask
-                )
-
-                # --------------------------------------------
-                # MID / MTM
-                # --------------------------------------------
-
-                if (
-                    bid is not None
-                    and ask is not None
-                ):
-
-                    mtm = (
-                        bid
-                        + ask
-                    ) / 2.0
-
-                elif bid is not None:
-
-                    mtm = bid
-
-                elif ask is not None:
-
-                    mtm = ask
-
-                else:
-
-                    mtm = None
-
-                prices[
-                    clean_text(
-                        contract
-                    )
-                ] = {
-                    "bid": bid,
-                    "ask": ask,
-                    "mtm": mtm,
-                }
-
+    for table_name in MARKET_DATA_TABLES:
+        df = load_effective_market_table(table_name, required_contracts)
+        if df.empty or not {"contract", "bid", "ask"}.issubset(df.columns):
+            continue
+        for _, row in df.iterrows():
+            bid = to_float(row.get("bid")); ask = to_float(row.get("ask"))
+            if bid is not None and ask is not None:
+                mtm = (bid + ask) / 2.0
+            elif bid is not None:
+                mtm = bid
+            elif ask is not None:
+                mtm = ask
+            else:
+                mtm = None
+            prices[clean_text(row.get("contract"))] = {"bid": bid, "ask": ask, "mtm": mtm}
     return prices
 
 

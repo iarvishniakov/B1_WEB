@@ -2,6 +2,7 @@ import pandas as pd
 import streamlit as st
 
 from db import get_conn
+from market_data_service import load_market_table as load_effective_market_table
 
 
 # ============================================================
@@ -377,98 +378,26 @@ def load_market_table(
     table_name,
     contracts,
 ):
-    """
-    Loads bid/ask from one approved Supabase table.
-
-    Returns:
-        {
-            contract: {
-                "bid": ...,
-                "ask": ...,
-                "mid": ...
-            }
-        }
-    """
-
-    if (
-        table_name
-        not in ALLOWED_SOURCE_TABLES
-    ):
-        raise ValueError(
-            f"Unsupported source table: {table_name}"
-        )
-
-    if not contracts:
-        return {}
-
-    conn = get_conn()
-
-    # Table name cannot be passed as a normal SQL parameter,
-    # therefore only whitelisted table names are accepted.
-    sql = f"""
-        SELECT
-            contract,
-            bid,
-            ask
-        FROM public.{table_name}
-        WHERE contract = ANY(%s)
-    """
-
-    with conn.cursor() as cur:
-        cur.execute(
-            sql,
-            (
-                list(contracts),
-            ),
-        )
-
-        rows = cur.fetchall()
-
+    """Load requested prices; md_snap is transparently replaced by effective IB/A1 data."""
+    if table_name not in ALLOWED_SOURCE_TABLES:
+        raise ValueError(f"Unsupported source table: {table_name}")
+    df = load_effective_market_table(table_name, contracts)
     result = {}
-
-    for (
-        contract,
-        bid,
-        ask,
-    ) in rows:
-
-        contract = clean_text(
-            contract
-        )
-
-        bid = to_float(
-            bid
-        )
-
-        ask = to_float(
-            ask
-        )
-
-        if (
-            bid is not None
-            and ask is not None
-        ):
-            mid = (
-                bid + ask
-            ) / 2.0
-
+    if df.empty or "contract" not in df.columns:
+        return result
+    for _, row in df.iterrows():
+        contract = clean_text(row.get("contract"))
+        bid = to_float(row.get("bid"))
+        ask = to_float(row.get("ask"))
+        if bid is not None and ask is not None:
+            mid = (bid + ask) / 2.0
         elif bid is not None:
             mid = bid
-
         elif ask is not None:
             mid = ask
-
         else:
             mid = None
-
-        result[
-            contract
-        ] = {
-            "bid": bid,
-            "ask": ask,
-            "mid": mid,
-        }
-
+        result[contract] = {"bid": bid, "ask": ask, "mid": mid}
     return result
 
 
