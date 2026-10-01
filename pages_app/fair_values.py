@@ -5,51 +5,42 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
-from pages_app.models import calculate_all_models, read_table, to_float
-
-
-# ============================================================
-# SETTINGS
-# ============================================================
+from pages_app.models import (
+    ModelContext,
+    calculate_all_models,
+    load_live_data,
+    load_reference_data,
+    read_table,
+    to_float,
+)
 
 INPUT_TABLE = "b1_fvpage_input"
 DISPLAY_SETTINGS_TABLE = "b1_displ_settings"
-
 DEFAULT_EDGE_DECIMALS = 2
 
-OUTPUT_COLUMNS = [
-    "Contract",
-    "Edge",
-    "| Edge % |",
-    "| Edge Ann. |",
-    "| ROC |",
-    "| RAR |",
-    "ts_tot",
-    "md_tot",
-    "ndays",
+BASE_COLUMNS = [
+    "Contract", "Edge", "| Edge % |", "| Edge Ann. |", "| ROC |", "| RAR |",
+    "ts_tot", "md_tot", "ndays",
 ]
+DETAIL_COLUMNS = ["MTM", "FV", "src contracts", "src weights / rate", "src prices / div"]
 
-PCT_COLUMNS = [
-    "| Edge % |",
-    "| Edge Ann. |",
-    "| ROC |",
-    "| RAR |",
-]
+# Text displayed in the detail cells of each section row.
+# These are deliberately hard-coded because one section may contain mixed models.
+SECTION_DETAIL_HEADERS = {
+    "Precious":       ["MTM", "FV", "src contracts", "src weights", "src prices"],
+    "Soft":           ["MTM", "FV", "src contracts", "src weights", "src prices"],
+    "Index":          ["MTM", "FV", "src contracts", "rate",        "div"],
+    "Nat Gas":        ["MTM", "FV", "src contracts", "src weights", "src prices"],
+    "Crypto futures": ["MTM", "FV", "src contracts", "src weights", "src prices"],
+    "Crypto ETFs":    ["MTM", "FV", "src contracts", "rate",        "div"],
+}
+PCT_COLUMNS = ["| Edge % |", "| Edge Ann. |", "| ROC |", "| RAR |"]
 
-
-# ============================================================
-# HELPERS
-# ============================================================
 
 def clean_text(value: Any) -> str:
     if value is None or pd.isna(value):
         return ""
     return str(value).strip()
-
-
-def fmt_num(value: Any, decimals: int = 2) -> str:
-    x = to_float(value)
-    return "" if x is None else f"{x:,.{decimals}f}"
 
 
 def fmt_pct(value: Any, decimals: int = 1) -> str:
@@ -62,486 +53,245 @@ def fmt_int(value: Any) -> str:
     return "" if x is None else f"{int(round(x))}"
 
 
-# ============================================================
-# DISPLAY SETTINGS
-# ============================================================
+def fmt_compact(value: Any, max_decimals: int = 4) -> str:
+    x = to_float(value)
+    if x is None:
+        return ""
+    s = f"{x:.{max_decimals}f}".rstrip("0").rstrip(".")
+    return "0" if s in {"-0", ""} else s
+
 
 def load_display_settings() -> dict[str, int]:
-    """
-    Load Edge decimal settings from b1_displ_settings.
-
-    Expected columns:
-        und_moex
-        spd_dec
-
-    Example:
-        GD -> 1
-        KC -> 3
-        NG -> 3
-        BT -> 0
-
-    If a contract has no matching setting,
-    DEFAULT_EDGE_DECIMALS is used.
-    """
     try:
         df = read_table(DISPLAY_SETTINGS_TABLE)
     except Exception:
         return {}
-
-    if df.empty:
+    if df.empty or "und_moex" not in df.columns or "spd_dec" not in df.columns:
         return {}
 
-    if "und_moex" not in df.columns or "spd_dec" not in df.columns:
-        return {}
-
-    settings: dict[str, int] = {}
-
+    out: dict[str, int] = {}
     for _, row in df.iterrows():
         und = clean_text(row.get("und_moex")).upper()
-        decimals = to_float(row.get("spd_dec"))
-
-        if not und or decimals is None:
-            continue
-
-        try:
-            decimals_int = int(decimals)
-        except (TypeError, ValueError):
-            continue
-
-        # Prevent accidental invalid formatting settings.
-        if decimals_int < 0:
-            continue
-
-        settings[und] = decimals_int
-
-    return settings
+        dec = to_float(row.get("spd_dec"))
+        if und and dec is not None and int(dec) >= 0:
+            out[und] = int(dec)
+    return out
 
 
-def get_edge_decimals(
-    contract: Any,
-    display_settings: dict[str, int],
-) -> int:
-    """
-    Find the display setting for a contract.
-
-    Uses the longest matching configured underlying prefix.
-
-    Examples:
-        GDZ6 -> GD
-        NGX6 -> NG
-        BTZ6 -> BT
-
-    If there is no match -> 2 decimals.
-    """
-    contract_text = clean_text(contract).upper()
-
-    if contract_text.startswith("MX:"):
-        contract_text = contract_text[3:]
-
-    if not contract_text:
-        return DEFAULT_EDGE_DECIMALS
-
-    # Longest prefix first, so this remains safe if one day
-    # both e.g. "S" and "SF" exist in the settings table.
-    for und in sorted(
-        display_settings.keys(),
-        key=len,
-        reverse=True,
-    ):
-        if contract_text.startswith(und):
-            return display_settings[und]
-
+def edge_decimals(contract: Any, settings: dict[str, int]) -> int:
+    c = clean_text(contract).upper()
+    if c.startswith("MX:"):
+        c = c[3:]
+    for und in sorted(settings, key=len, reverse=True):
+        if c.startswith(und):
+            return settings[und]
     return DEFAULT_EDGE_DECIMALS
 
 
-def fmt_edge(
-    value: Any,
-    contract: Any,
-    display_settings: dict[str, int],
-) -> str:
-    """
-    Format Edge using b1_displ_settings.spd_dec.
-
-    Keeps trailing zeroes intentionally:
-        decimals = 3 -> 1.200
-        decimals = 1 -> 1.2
-        decimals = 0 -> 1
-    """
+def fmt_edge(value: Any, contract: Any, settings: dict[str, int]) -> str:
     x = to_float(value)
-
     if x is None:
         return ""
-
-    decimals = get_edge_decimals(
-        contract,
-        display_settings,
-    )
-
-    return f"{x:,.{decimals}f}"
+    dec = edge_decimals(contract, settings)
+    return f"{x:,.{dec}f}"
 
 
-# ============================================================
-# MODEL DATA
-# ============================================================
-
-def build_model_lookup() -> dict[str, dict]:
-    """
-    Combine all model outputs into one:
-
-        contract_moex -> result
-    """
+def build_model_lookup() -> tuple[dict[str, dict], ModelContext]:
+    """One lookup for calculated model rows, plus live MD context for mirror source price."""
     models = calculate_all_models()
-
     lookup: dict[str, dict] = {}
-
     for df in models.values():
-
         if df.empty or "contract_moex" not in df.columns:
             continue
-
         for _, row in df.iterrows():
-
-            contract = clean_text(
-                row.get("contract_moex")
-            )
-
+            contract = clean_text(row.get("contract_moex"))
             if contract:
                 lookup[contract] = row.to_dict()
 
-    return lookup
+    # Mirror output does not expose MTM_INTL, so use the same Models market-data
+    # layer to obtain the source contract MTM without duplicating pricing logic.
+    ctx = ModelContext(load_reference_data(), load_live_data())
+    return lookup, ctx
 
 
-# ============================================================
-# FAIR VALUES TABLE
-# ============================================================
+def model_details(result: dict, ctx: ModelContext) -> dict[str, Any]:
+    model = clean_text(result.get("model")).lower()
+    details = {c: "" for c in DETAIL_COLUMNS}
+    details["MTM"] = result.get("MTM")
+    details["FV"] = result.get("FV")
+
+    if model == "curve":
+        c1, c2 = clean_text(result.get("c1")), clean_text(result.get("c2"))
+        details["src contracts"] = "     ".join(x for x in [c1, c2] if x)
+
+        w1, w2 = to_float(result.get("w1")), to_float(result.get("w2"))
+        weights = []
+        if w1 is not None:
+            weights.append(f"{w1:.2f}")
+        if w2 is not None:
+            weights.append(f"{w2:.2f}")
+        details["src weights / rate"] = "     ".join(weights)
+
+        p1, p2 = result.get("p1"), result.get("p2")
+        details["src prices / div"] = "     ".join(
+            x for x in [fmt_compact(p1), fmt_compact(p2)] if x
+        )
+
+    elif model == "mirror":
+        contract_intl = clean_text(result.get("contract_intl"))
+        details["src contracts"] = contract_intl
+        px = ctx.md.get(contract_intl) if contract_intl else None
+        details["src prices / div"] = "" if px is None else px.mtm
+
+    elif model == "mirror+fx":
+        contract_intl = clean_text(result.get("contract_intl"))
+        c1, c2 = clean_text(result.get("c1")), clean_text(result.get("c2"))
+        details["src contracts"] = "     ".join(
+            x for x in [contract_intl, c1, c2] if x
+        )
+
+        w1, w2 = to_float(result.get("w1")), to_float(result.get("w2"))
+        weights = []
+        if w1 is not None:
+            weights.append(f"{w1:.2f}")
+        if w2 is not None:
+            weights.append(f"{w2:.2f}")
+        details["src weights / rate"] = "     ".join(weights)
+
+        details["src prices / div"] = "     ".join(
+            x for x in [fmt_compact(result.get("MTM_INTL")), fmt_compact(result.get("FX"))] if x
+        )
+
+    elif model == "etf":
+        details["src weights / rate"] = result.get("r")
+        details["src prices / div"] = result.get("d")
+
+    return details
+
 
 def build_fair_values_table() -> pd.DataFrame:
-    """
-    Build Fair Values in b1_fvpage_input order.
-
-    Rules:
-
-        GDZ6
-            -> lookup MX:GDZ6
-
-        ***Precious
-            -> section row displayed as Precious
-
-    The displayed Contract remains without MX:.
-    """
     inp = read_table(INPUT_TABLE)
-
     if inp.empty:
-        return pd.DataFrame(
-            columns=OUTPUT_COLUMNS + ["_section"]
-        )
-
+        return pd.DataFrame(columns=BASE_COLUMNS + DETAIL_COLUMNS + ["_section", "_model"])
     if "contract" not in inp.columns:
-        raise ValueError(
-            f'{INPUT_TABLE} must contain a column named "contract".'
-        )
+        raise ValueError(f'{INPUT_TABLE} must contain a column named "contract".')
 
-    model_lookup = build_model_lookup()
-
+    model_lookup, ctx = build_model_lookup()
     rows: list[dict] = []
 
     for raw_contract in inp["contract"].tolist():
-
         item = clean_text(raw_contract)
-
         if not item:
             continue
 
-        # ----------------------------------------------------
-        # SECTION ROW
-        # ----------------------------------------------------
-
         if item.startswith("***"):
-
             section_name = item[3:].strip()
+            row = {c: None for c in BASE_COLUMNS + DETAIL_COLUMNS}
+            row.update({"Contract": section_name, "_section": True, "_model": ""})
 
-            rows.append({
-                "Contract": section_name,
-                "_section": True,
-            })
+            # When details are expanded, the section row itself acts as the
+            # repeated header for the right-hand detail block.
+            hdr = SECTION_DETAIL_HEADERS.get(
+                section_name,
+                ["MTM", "FV", "src contracts", "src weights", "src prices"],
+            )
+            for col, label in zip(DETAIL_COLUMNS, hdr):
+                row[col] = label
 
+            rows.append(row)
             continue
 
-        # ----------------------------------------------------
-        # CONTRACT ROW
-        # ----------------------------------------------------
-
-        lookup_contract = (
-            item
-            if item.startswith("MX:")
-            else f"MX:{item}"
-        )
-
-        result = model_lookup.get(
-            lookup_contract,
-            {},
-        )
-
-        display_contract = (
-            item[3:]
-            if item.startswith("MX:")
-            else item
-        )
+        lookup_contract = item if item.startswith("MX:") else f"MX:{item}"
+        result = model_lookup.get(lookup_contract, {})
+        display_contract = item[3:] if item.startswith("MX:") else item
+        details = model_details(result, ctx) if result else {c: "" for c in DETAIL_COLUMNS}
 
         rows.append({
             "Contract": display_contract,
-
-            "Edge":
-                result.get("Edge"),
-
-            "| Edge % |":
-                result.get("| Edge % |"),
-
-            "| Edge Ann. |":
-                result.get("| Edge Ann. |"),
-
-            "| ROC |":
-                result.get("| ROC |"),
-
-            "| RAR |":
-                result.get("| RAR |"),
-
-            "ts_tot":
-                result.get("ts_tot"),
-
-            "md_tot":
-                result.get("md_tot"),
-
-            "ndays":
-                result.get("ndays"),
-
+            "Edge": result.get("Edge"),
+            "| Edge % |": result.get("| Edge % |"),
+            "| Edge Ann. |": result.get("| Edge Ann. |"),
+            "| ROC |": result.get("| ROC |"),
+            "| RAR |": result.get("| RAR |"),
+            "ts_tot": result.get("ts_tot"),
+            "md_tot": result.get("md_tot"),
+            "ndays": result.get("ndays"),
+            **details,
             "_section": False,
+            "_model": clean_text(result.get("model")),
         })
 
     return pd.DataFrame(rows)
 
 
-# ============================================================
-# DISPLAY FORMATTING
-# ============================================================
+def format_for_display(raw: pd.DataFrame, show_details: bool) -> pd.DataFrame:
+    settings = load_display_settings()
+    cols = BASE_COLUMNS + (DETAIL_COLUMNS if show_details else [])
+    shown = raw.reindex(columns=cols).copy()
 
-def format_for_display(
-    raw: pd.DataFrame,
-    display_settings: dict[str, int],
-) -> pd.DataFrame:
-
-    shown = raw.reindex(
-        columns=OUTPUT_COLUMNS
-    ).copy()
-
-    # --------------------------------------------------------
-    # EDGE
-    #
-    # Custom number of decimals from:
-    # b1_displ_settings.spd_dec
-    # --------------------------------------------------------
-
-    if "Edge" in shown.columns:
-
-        shown["Edge"] = [
-            fmt_edge(
-                edge,
-                contract,
-                display_settings,
-            )
-            for edge, contract in zip(
-                shown["Edge"],
-                shown["Contract"],
-            )
-        ]
-
-    # --------------------------------------------------------
-    # PERCENTAGES
-    # --------------------------------------------------------
-
+    shown["Edge"] = [fmt_edge(v, c, settings) for v, c in zip(shown["Edge"], shown["Contract"])]
     for col in PCT_COLUMNS:
+        shown[col] = shown[col].map(lambda x: fmt_pct(x, 1))
+    shown["ndays"] = shown["ndays"].map(fmt_int)
 
-        if col in shown.columns:
+    if show_details:
+        shown["MTM"] = shown["MTM"].map(fmt_compact)
+        shown["FV"] = shown["FV"].map(fmt_compact)
+
+        # Keep pre-composed source strings untouched; format scalar ETF/mirror values.
+        for col in ["src weights / rate", "src prices / div"]:
             shown[col] = shown[col].map(
-                lambda x: fmt_pct(x, 1)
+                lambda v: v if isinstance(v, str) else fmt_compact(v)
             )
-
-    # --------------------------------------------------------
-    # NDAYS
-    # --------------------------------------------------------
-
-    if "ndays" in shown.columns:
-        shown["ndays"] = shown["ndays"].map(
-            fmt_int
-        )
 
     return shown
 
 
-# ============================================================
-# STYLING
-# ============================================================
-
-def style_fair_values(
-    shown: pd.DataFrame,
-    section_mask: pd.Series,
-):
-    """
-    Style contracts/statuses and make section rows distinct.
-    """
-
+def style_fair_values(shown: pd.DataFrame, section_mask: pd.Series):
     def style_rows(row):
-
-        idx = row.name
-
-        if bool(section_mask.loc[idx]):
-
-            return [
-                (
-                    "font-weight: bold; "
-                    "background-color: "
-                    "rgba(128, 128, 128, 0.18)"
-                )
-            ] * len(row)
-
+        if bool(section_mask.loc[row.name]):
+            return ["font-weight: bold; background-color: rgba(128,128,128,0.18)"] * len(row)
         return [""] * len(row)
 
     def color_bool(value):
-
         if value is True:
-            return (
-                "color: green; "
-                "font-weight: bold"
-            )
-
+            return "color: green; font-weight: bold"
         if value is False:
-            return (
-                "color: red; "
-                "font-weight: bold"
-            )
-
+            return "color: red; font-weight: bold"
         return ""
 
-    styler = shown.style.apply(
-        style_rows,
-        axis=1,
-    )
-
-    # Center all values and column headers
-    styler = styler.set_properties(
-        **{
-            "text-align": "center",
-            "vertical-align": "middle",
-        }
-    )
-
-    styler = styler.set_table_styles(
-        [
-            {
-                "selector": "th",
-                "props": [
-                    ("text-align", "center"),
-                    ("vertical-align", "middle"),
-                ],
-            }
-        ]
-    )
-
-    # Contract bold
-    if "Contract" in shown.columns:
-
-        styler = styler.set_properties(
-            subset=["Contract"],
-            **{
-                "font-weight": "bold",
-            },
-        )
-
-    # Status colors
+    styler = shown.style.apply(style_rows, axis=1)
+    styler = styler.set_properties(subset=["Contract"], **{"font-weight": "bold"})
+    if "| RAR |" in shown.columns:
+        styler = styler.set_properties(subset=["| RAR |"], **{"font-weight": "bold"})
     for col in ["ts_tot", "md_tot"]:
-
         if col in shown.columns:
-
-            styler = styler.map(
-                color_bool,
-                subset=[col],
-            )
-
+            styler = styler.map(color_bool, subset=[col])
     return styler
 
 
-# ============================================================
-# PAGE
-# ============================================================
-
 def render_fair_values_page():
-
     st.title("Fair Values")
 
+    # Compact by default; one click expands the source/model detail columns.
+    show_details = st.toggle("Show model details", value=False)
+
     try:
-
-        # -----------------------------------------------
-        # Build model results
-        # -----------------------------------------------
-
         raw = build_fair_values_table()
-
-        # -----------------------------------------------
-        # Load custom display settings
-        # -----------------------------------------------
-
-        display_settings = load_display_settings()
-
     except Exception as exc:
-
-        st.error(
-            f"Fair Values calculation failed: {exc}"
-        )
-
+        st.error(f"Fair Values calculation failed: {exc}")
         return
 
     if raw.empty:
-
-        st.info(
-            "No rows in b1_fvpage_input."
-        )
-
+        st.info("No rows in b1_fvpage_input.")
         return
 
-    # Section rows
-    section_mask = (
-        raw["_section"]
-        .fillna(False)
-        .astype(bool)
-    )
-
-    # Format values
-    shown = format_for_display(
-        raw,
-        display_settings,
-    )
-
-    # --------------------------------------------------------
-    # TABLE HEIGHT
-    #
-    # Make the table tall enough to display every row
-    # without Streamlit's internal vertical scrollbar.
-    # --------------------------------------------------------
-
+    section_mask = raw["_section"].fillna(False).astype(bool)
+    shown = format_for_display(raw, show_details)
     table_height = 38 + len(shown) * 35
 
-    # --------------------------------------------------------
-    # DISPLAY
-    #
-    # width="content" prevents the table stretching across
-    # the entire Streamlit page.
-    # --------------------------------------------------------
-
     st.dataframe(
-        style_fair_values(
-            shown,
-            section_mask,
-        ),
+        style_fair_values(shown, section_mask),
         width="content",
         height=table_height,
         hide_index=True,
