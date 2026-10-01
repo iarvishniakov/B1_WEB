@@ -1,19 +1,58 @@
 import streamlit as st
-from streamlit_autorefresh import st_autorefresh
+from streamlit_autorefresh import (
+    st_autorefresh,
+)
 
 from config import REFRESH_RATE
 
-from pages_app.spreads import render_spreads_page
-from pages_app.fair_values import render_fair_values_page
-from pages_app.index_arb import render_index_arb_page
-from pages_app.open_interest import render_open_interest_page
-from pages_app.curves import render_curves_page
-from pages_app.price_mapping import render_price_mapping_page
-from pages_app.market_data import render_market_data_page
-from pages_app.ru_ssf_rates import render_ru_ssf_rates_page
-from pages_app.rflb_curve import render_rflb_curve_page
-from pages_app.models import render_models_page
-from pages_app.settings import render_settings_page
+from pages_app.spreads import (
+    render_spreads_page,
+)
+
+from pages_app.fair_values import (
+    render_fair_values_page,
+)
+
+from pages_app.yields_graphs import (
+    render_yields_graphs_page,
+)
+
+from pages_app.index_arb import (
+    render_index_arb_page,
+)
+
+from pages_app.open_interest import (
+    render_open_interest_page,
+)
+
+from pages_app.curves import (
+    render_curves_page,
+)
+
+from pages_app.price_mapping import (
+    render_price_mapping_page,
+)
+
+from pages_app.market_data import (
+    render_market_data_page,
+)
+
+from pages_app.ru_ssf_rates import (
+    render_ru_ssf_rates_page,
+)
+
+from pages_app.rflb_curve import (
+    render_rflb_curve_page,
+)
+
+from pages_app.models import (
+    render_models_page,
+)
+
+from pages_app.settings import (
+    render_settings_page,
+)
+
 
 # ============================================================
 # PAGE CONFIG
@@ -39,13 +78,16 @@ st_autorefresh(
 # SIDEBAR
 # ============================================================
 
-st.sidebar.header("Tables")
+st.sidebar.header(
+    "Tables"
+)
 
 page = st.sidebar.radio(
     "Select table",
     [
         "Spreads",
         "Fair Values",
+        "Yields Graphs",
         "Index Arb",
         "Russian SSF Rates",
         "Open Interest",
@@ -74,9 +116,17 @@ try:
 
         render_fair_values_page()
 
+    elif page == "Yields Graphs":
+
+        render_yields_graphs_page()
+
     elif page == "Index Arb":
 
         render_index_arb_page()
+
+    elif page == "Russian SSF Rates":
+
+        render_ru_ssf_rates_page()
 
     elif page == "Open Interest":
 
@@ -86,6 +136,10 @@ try:
 
         render_curves_page()
 
+    elif page == "RFLB Curve":
+
+        render_rflb_curve_page()
+
     elif page == "Price Mapping":
 
         render_price_mapping_page()
@@ -94,16 +148,12 @@ try:
 
         render_market_data_page()
 
-    elif page == "Russian SSF Rates":
-        render_ru_ssf_rates_page()
-
-    elif page == "RFLB Curve":
-        render_rflb_curve_page()
-
     elif page == "Models":
+
         render_models_page()
 
     elif page == "Settings":
+
         render_settings_page()
 
 
@@ -121,5 +171,6 @@ except Exception as e:
 # ============================================================
 
 st.caption(
-    f"Auto-refresh: {REFRESH_RATE} seconds"
+    f"Auto-refresh: "
+    f"{REFRESH_RATE} seconds"
 )
