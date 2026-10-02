@@ -9,6 +9,10 @@ from pages_app.spreads import (
     render_spreads_page,
 )
 
+from pages_app.status_bar import (
+    render_market_status_bar,
+)
+
 from pages_app.fair_values import (
     render_fair_values_page,
 )
@@ -72,6 +76,13 @@ st_autorefresh(
     interval=REFRESH_RATE * 1000,
     key="global_refresh",
 )
+
+
+# ============================================================
+# GLOBAL MARKET DATA STATUS
+# ============================================================
+
+render_market_status_bar()
 
 
 # ============================================================
